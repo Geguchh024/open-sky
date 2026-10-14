@@ -368,6 +368,48 @@ def new_group(name, inputs, outputs, version):
     return ng, nb, gin, gout
 
 
+GATE = "Gate"
+
+
+def gate(nb, node, output):
+    """`node.outputs[output]` through a pass-through that reads 0 when cut.
+
+    GPU shaders run every node that reaches the output, so a part of a tree
+    that is not needed is skipped by unlinking its gates (see rig.prune).
+    The gate is found again by name: Gate|<node name>|<output>.
+    """
+    src = find_output(node, output)
+    scalar = src.type == "VALUE"
+    g = nb.node("ShaderNodeMath" if scalar else "ShaderNodeVectorMath", operation="ADD")
+    zero = 0.0 if scalar else (0.0, 0.0, 0.0)
+    g.inputs[0].default_value = g.inputs[1].default_value = zero
+    g.name = g.label = f"{GATE}|{node.name}|{output}"
+    nb.link(src, g.inputs[0])
+    return g.outputs[0]
+
+
+def gates(tree):
+    """(gate node, source node, output name) for every gate in `tree`."""
+    for g in tree.nodes:
+        parts = g.name.split("|")
+        if len(parts) == 3 and parts[0] == GATE:
+            src = tree.nodes.get(parts[1])
+            if src is not None:
+                yield g, src, parts[2]
+
+
+def set_gate(tree, g, src, output, on):
+    """Link or cut one gate. Returns True when it changed."""
+    if g.inputs[0].is_linked == on:
+        return False
+    if on:
+        tree.links.new(src.outputs[output], g.inputs[0])
+    else:
+        for link in list(g.inputs[0].links):
+            tree.links.remove(link)
+    return True
+
+
 def group_node(nb, group):
     n = nb.node("ShaderNodeGroup")
     n.node_tree = group

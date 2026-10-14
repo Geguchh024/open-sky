@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.2
+
+- Much faster viewport, still or moving. Layers that are switched off
+  (cloud deck, cirrus, aurora, rainbow/halo/lightning) are now cut out of
+  the shader instead of being computed at strength 0: a clear sky draws
+  about 8x faster (130 ms to 15 ms per frame at 1080p on an RTX 5060). A layer
+  comes back by itself when its strength goes above 0 or is keyframed.
+- Draft Clouds (Clouds panel): half the cloud slices and less noise detail,
+  about twice as fast in the viewport. Turn it off for final renders; with it
+  off the clouds render exactly as before.
+
+## 0.2.1
+
+- Much faster animation playback (about 3-4 fps to 20-24 fps in the EEVEE
+  viewport). The sky's clock is now a scene property (`os_time`) read by an
+  Attribute node, so moving clouds, stars and aurora no longer re-bake the
+  world lighting or update the lamps and their shadows every frame. Renders
+  are unchanged, and files from 0.2.0 are converted when opened.
+- Camera & Tools has a Sky Lighting resolution setting (EEVEE). 256 makes
+  animating the sun about twice as fast.
+
 ## 0.2.0
 
 - Clouds:

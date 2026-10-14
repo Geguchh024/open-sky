@@ -21,7 +21,8 @@ from mathutils import Matrix, Vector  # noqa: E402
 import open_sky  # noqa: E402
 
 open_sky.register()
-from open_sky import presets, rig, sky, ui, weather  # noqa: E402
+from open_sky import clouds, presets, rig, sky, ui, weather  # noqa: E402
+from open_sky.nodekit import gates  # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="os_tests_")
 results = []
@@ -436,6 +437,90 @@ def renders_in_both_engines():
             # An overcast sky is less blue than a clear one.
             assert grey[2] / grey[0] < day[2] / day[0], (engine, day, grey)
 
+
+@test
+def playback_leaves_world_and_lamps_alone():
+    # Driving Time on the world itself re-bakes EEVEE's world lighting and
+    # re-evaluates both lamps (and their shadows) on every frame.
+    scene, world = new_sky()
+    updated = []
+
+    def log(_scene, depsgraph):
+        updated.extend(u.id.name for u in depsgraph.updates)
+
+    bpy.app.handlers.frame_change_post.append(log)
+    try:
+        scene.frame_set(2)
+        updated.clear()
+        scene.frame_set(3)
+    finally:
+        bpy.app.handlers.frame_change_post.remove(log)
+    for name in (world.name, rig.SUN_NAME, rig.MOON_NAME):
+        assert name not in updated, (name, updated)
+    fps = scene.render.fps / scene.render.fps_base
+    assert abs(scene[rig.TIME] - 3 / fps) < 1e-6, scene[rig.TIME]
+    attr = world.node_tree.nodes[rig.CLOCK]
+    assert rig.sky_node(world).inputs["Time"].links[0].from_node == attr
+
+
+@test
+def old_clock_is_migrated_on_load():
+    scene, world = new_sky()
+    node = rig.sky_node(world)
+    world.node_tree.nodes.remove(world.node_tree.nodes[rig.CLOCK])
+    scene.driver_remove(f'["{rig.TIME}"]')
+    node.inputs["Time"].driver_add("default_value").driver.expression = "frame/24"
+    assert rig.uses_old_clock(world)
+    assert rig.upgrade_file()
+    assert not rig.uses_old_clock(world)
+    ad = world.node_tree.animation_data
+    assert not (ad and ad.drivers.find(rig.input_path("Time").split(".", 1)[1])),         "old Time driver left behind"
+    assert not rig.upgrade_file()
+
+@test
+def unused_layers_are_cut_from_the_shader():
+    # A layer at strength 0 still costs its full price on the GPU unless it
+    # is unlinked; the cloud deck alone is most of the sky's render time.
+    scene, world = new_sky()
+    node = rig.sky_node(world)
+    group = node.node_tree
+
+    def linked(feature):
+        states = {g.inputs[0].is_linked for g, src, _ in gates(group) if src.name == feature}
+        assert len(states) == 1, (feature, states)
+        return states.pop()
+
+    assert set(sky.FEATURES) == {src.name for _, src, _ in gates(group)}
+    for feature in sky.FEATURES:
+        assert not linked(feature), feature
+    node.inputs["Cloud Coverage"].default_value = 0.5
+    rig.prune()
+    assert linked(sky.CLOUDS) and not linked(sky.AURORA)
+    # Keyframed from 0: the layer must stay compiled for the whole shot.
+    node.inputs["Aurora"].default_value = 0.0
+    node.inputs["Aurora"].keyframe_insert("default_value", frame=1)
+    rig.prune()
+    assert linked(sky.AURORA)
+    assert bpy.ops.open_sky.apply_preset(preset="CLEAR_DAY") == {"FINISHED"}
+    assert not linked(sky.CLOUDS)
+
+@test
+def draft_clouds_cut_slices_and_survive_rebuild():
+    scene, world = new_sky()
+    tree = bpy.data.node_groups[sky.CLOUDS]
+    cut = list(gates(tree))
+    assert len(cut) == 2 * (clouds.CLOUD_SLICES - int(clouds.QUALITY[True]["Slices"])), len(cut)
+    assert not scene.open_sky.draft_clouds
+    assert all(g.inputs[0].is_linked for g, _, _ in cut)
+    scene.open_sky.draft_clouds = True
+    assert scene.open_sky.draft_clouds
+    assert not any(g.inputs[0].is_linked for g, _, _ in gates(tree))
+    rig.upgrade(world, scene)
+    assert scene.open_sky.draft_clouds
+    scene.open_sky.draft_clouds = False
+    deck = bpy.data.node_groups[sky.MAIN].nodes[sky.CLOUDS]
+    assert deck.inputs["Slices"].default_value == clouds.CLOUD_SLICES
+    assert all(g.inputs[0].is_linked for g, _, _ in gates(tree))
 
 # ---------------------------------------------------------------------------
 

@@ -158,6 +158,12 @@ def _make_panels(prefix, space, region, category=None, context_name=None):
         if settings.light_shafts:
             draw_inputs(layout, rig.sky_node(world), ["Light Shafts"])
 
+    def clouds_extra(layout, context):
+        settings = context.scene.open_sky
+        layout.prop(settings, "draft_clouds")
+        if settings.draft_clouds:
+            layout.label(text="Turn off before the final render", icon="ERROR")
+
     def precipitation_draw(self, context):
         world = _world(context)
         ob = rig.weather_object(world)
@@ -185,6 +191,11 @@ def _make_panels(prefix, space, region, category=None, context_name=None):
             col.prop(scene.view_settings, "exposure")
         col.prop(scene.view_settings, "view_transform")
         col.prop(scene.view_settings, "look")
+        world = _world(context)
+        if scene.render.engine == "BLENDER_EEVEE" and hasattr(world, "probe_resolution"):
+            # EEVEE re-bakes the world lighting whenever the sun moves; at
+            # 256 that is about twice as fast and the lighting looks the same.
+            col.prop(world, "probe_resolution", text="Sky Lighting")
         row = layout.row(align=True)
         row.operator("open_sky.reset", icon="LOOP_BACK")
         row.operator("open_sky.repair", icon="FILE_REFRESH")
@@ -198,7 +209,7 @@ def _make_panels(prefix, space, region, category=None, context_name=None):
         section("MOON", "Moon", moon_extra),
         section("NIGHT", "Stars & Milky Way"),
         section("AURORA", "Aurora"),
-        section("CLOUDS", "Clouds"),
+        section("CLOUDS", "Clouds", clouds_extra),
         section("WEATHER", "Weather", weather_extra),
         type(f"{prefix}_PT_open_sky_precipitation", (_Base, bpy.types.Panel), {
             **common, "bl_label": "Rain & Snow Particles",

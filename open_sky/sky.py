@@ -19,9 +19,9 @@ import math
 import bpy
 
 from . import clouds
-from .nodekit import auto_layout, find_output, group_node, new_group
+from .nodekit import auto_layout, find_output, gate, group_node, new_group
 
-GROUP_VERSION = 2
+GROUP_VERSION = 3
 
 MAIN = "Open Sky"
 ATMOS = "OS Atmosphere"
@@ -161,6 +161,18 @@ def _flat(specs):
 INPUT_SPECS = {s[0]: s for s in _flat(MAIN_INPUTS)}
 # Inputs the rig drives; the UI shows them as read-only information.
 DRIVEN_INPUTS = {"Sun Direction", "Moon Direction", "Time"}
+
+# Optional layers and the inputs that switch them on. GPU shaders run every
+# node that reaches the output, whatever its strength, so each layer's
+# outputs pass through a gate (nodekit.gate) that the rig unlinks while all
+# of its inputs are 0 (rig.prune). An unlinked gate reads 0, which leaves
+# the picture unchanged. The cloud deck alone is most of the cost of the sky.
+FEATURES = {
+    CLOUDS: ("Cloud Coverage",),
+    CIRRUS: ("Cirrus",),
+    AURORA: ("Aurora",),
+    FX: ("Rainbow", "Ice Halo", "Lightning"),
+}
 
 
 def default_value(name):
@@ -575,6 +587,7 @@ def build_main(groups):
     _wire(nb, milky, gin, {"Strength": "Milky Way", "Width": "Milky Way Width",
                            "Dust Lanes": "Dust Lanes"})
     aurora = group_node(nb, groups[AURORA])
+    aurora.name = AURORA
     nb.set(aurora, "Vector", view)
     _wire(nb, aurora, gin, {"Strength": "Aurora", "Low Color": "Aurora Low Color",
                             "High Color": "Aurora High Color", "Height": "Aurora Height",
@@ -588,7 +601,7 @@ def build_main(groups):
     above = nb.smooth(vz, -0.002, 0.004)
     hidden = nb.one_minus(find_output(moon, "Mask"))
     deep = nb.vadd(nb.vscale(find_output(stars, "Color"), hidden), find_output(milky, "Color"))
-    deep = nb.vadd(deep, find_output(aurora, "Color"))
+    deep = nb.vadd(deep, gate(nb, aurora, "Color"))
     deep = nb.vscale(nb.vmul(deep, t_view), nb.mul(dark, above))
 
     airglow = nb.vscale(g["Night Color"],
@@ -610,13 +623,14 @@ def build_main(groups):
     # -- weather and clouds, composited over everything behind them ----------
     time = g["Time"]
     fx = group_node(nb, groups[FX])
+    fx.name = FX
     nb.set(fx, "View", view)
     nb.set(fx, "Sun", sun)
     nb.set(fx, "Sun Light", nb.vmul(sun_light, t_sun))
     nb.set(fx, "Time", time)
     _wire(nb, fx, gin, {"Rainbow": "Rainbow", "Halo": "Ice Halo",
                         "Lightning": "Lightning", "Cloud Height": "Cloud Height"})
-    flash = find_output(fx, "Flash")
+    flash = gate(nb, fx, "Flash")
 
     # Clouds are lit by the sun (red from below at dusk) or, at night, the moon.
     _, _, mz = nb.sep(moon_dir)
@@ -641,6 +655,7 @@ def build_main(groups):
     drift = nb.mul(nb.mul(g["Wind Speed"], time), -clouds.WIND_KM)
 
     cirrus = group_node(nb, groups[CIRRUS])
+    cirrus.name = CIRRUS
     nb.set(cirrus, "View", view)
     nb.set(cirrus, "Light Dir", key_dir)
     nb.set(cirrus, "Light Color", key_light)
@@ -650,12 +665,13 @@ def build_main(groups):
     _wire(nb, cirrus, gin, {"Coverage": "Cirrus", "Height": "Cirrus Height",
                             "Scale": "Cirrus Scale"})
     ci_fade = nb.smooth(vz, 0.0, 0.12)
-    ci_alpha = nb.mul(find_output(cirrus, "Alpha"), ci_fade)
+    ci_alpha = nb.mul(gate(nb, cirrus, "Alpha"), ci_fade)
     colour = nb.vadd(nb.vscale(colour, nb.one_minus(ci_alpha)),
-                     nb.vscale(find_output(cirrus, "Color"), ci_fade))
-    colour = nb.vadd(colour, find_output(fx, "Halo"))
+                     nb.vscale(gate(nb, cirrus, "Color"), ci_fade))
+    colour = nb.vadd(colour, gate(nb, fx, "Halo"))
 
     deck = group_node(nb, groups[CLOUDS])
+    deck.name = CLOUDS
     nb.set(deck, "View", view)
     nb.set(deck, "Light Dir", key_dir)
     nb.set(deck, "Light Color", key_light)
@@ -668,14 +684,15 @@ def build_main(groups):
                           "Scale": "Cloud Scale", "Puffiness": "Cloud Puffiness",
                           "Darkness": "Cloud Darkness", "Color": "Cloud Color"})
     # Distant clouds melt into the haze.
-    fade = nb.exp(nb.div(nb.mul(find_output(deck, "Distance"), -1.0), g["Cloud Distance"]))
-    cu_alpha = nb.mul(find_output(deck, "Alpha"), fade)
+    fade = nb.exp(nb.div(nb.mul(gate(nb, deck, "Distance"), -1.0),
+                         g["Cloud Distance"]))
+    cu_alpha = nb.mul(gate(nb, deck, "Alpha"), fade)
     colour = nb.vadd(nb.vscale(colour, nb.one_minus(cu_alpha)),
-                     nb.vscale(find_output(deck, "Color"), fade))
+                     nb.vscale(gate(nb, deck, "Color"), fade))
 
     clear = nb.mul(nb.one_minus(ci_alpha), nb.pow(nb.one_minus(cu_alpha), 10.0))
     colour = nb.vadd(colour, nb.vscale(sun_seen, clear))
-    colour = nb.vadd(colour, nb.vadd(find_output(fx, "Rainbow"), find_output(fx, "Bolt")))
+    colour = nb.vadd(colour, nb.vadd(gate(nb, fx, "Rainbow"), gate(nb, fx, "Bolt")))
     colour = nb.vadd(colour, nb.vscale(flash, nb.mul(nb.smooth(vz, -0.05, 0.1), 0.01)))
 
     # Light shafts: a thin world volume the sun lamp shines through. It is only

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "open_sky"
-version = "0.2.0"
+version = "0.2.2"
 name = "Open Sky"
 tagline = "Procedural sky, clouds and weather for Blender"
 maintainer = "Open Sky contributors"

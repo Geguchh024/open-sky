@@ -12,9 +12,15 @@ believable speed.
 
 import math
 
-from .nodekit import find_output, group_node, new_group
+from .nodekit import find_output, gate, group_node, new_group
 
 CLOUD_SLICES = 8
+# Draft clouds (rig.set_draft_clouds): half the slices and less noise
+# detail, about twice as fast. The other slices are cut by their gates.
+QUALITY = {
+    False: {"Slices": float(CLOUD_SLICES), "Detail": 5.0, "Light Detail": 2.0},
+    True: {"Slices": 4.0, "Detail": 3.0, "Light Detail": 1.0},
+}
 WIND_KM = 0.001  # m/s -> km/s
 
 
@@ -39,6 +45,8 @@ def build_cloud_slice(version):
         ("Thickness", "float", 1.2, 0, 20),
         ("Offset", "vector", (0, 0, 0)),
         ("Evolve", "float", 0.0, -1e6, 1e6),
+        ("Detail", "float", 5.0, 0, 15),
+        ("Light Detail", "float", 2.0, 0, 15),
     ], [("Sigma", "float"), ("Light", "float")], version)
     g = gin.outputs
     vx, vy, vz = nb.sep(g["View"])
@@ -57,15 +65,15 @@ def build_cloud_slice(version):
         n = nb.nfac(q, 1.0, detail, 0.55, dims="4D", w=nb.mul(g["Evolve"], 0.05))
         return q, n
 
-    q, shape = density(pos, 5.0)
-    erode = nb.nfac(q, 4.0, 2.0, 0.5)
+    q, shape = density(pos, g["Detail"])
+    erode = nb.nfac(q, 4.0, g["Light Detail"], 0.5)
     edge = nb.mul(nb.mul(nb.sub(erode, 0.5), g["Puffiness"]), 0.15)
     dens = nb.clamp01(nb.mul(nb.sub(nb.sub(shape, thr), edge), 5.0))
     sigma = nb.mul(nb.mul(dens, base_fade), g["Density"])
 
     # Light: how much cloud lies between this point and the sun or moon.
     lpos = nb.vadd(pos, nb.vscale(g["Light Dir"], nb.mul(g["Thickness"], 0.35)))
-    _, lshape = density(lpos, 2.0)
+    _, lshape = density(lpos, g["Light Detail"])
     ldens = nb.clamp01(nb.mul(nb.sub(lshape, thr), 5.0))
     light = nb.exp(nb.mul(nb.mul(ldens, g["Density"]), -2.5))
     light = nb.lerp(light, 1.0, nb.mul(nb.mul(frac, frac), 0.4))
@@ -97,6 +105,9 @@ def build_clouds(slice_group, version):
         ("Color", "color", (1, 1, 1)),
         ("Offset", "vector", (0, 0, 0)),
         ("Evolve", "float", 0.0, -1e6, 1e6),
+        ("Slices", "float", float(CLOUD_SLICES), 1, CLOUD_SLICES),
+        ("Detail", "float", 5.0, 0, 15),
+        ("Light Detail", "float", 2.0, 0, 15),
     ], [("Color", "color"), ("Alpha", "float"), ("Distance", "float")], version)
     g = gin.outputs
     view = g["View"]
@@ -112,23 +123,27 @@ def build_clouds(slice_group, version):
     ambient = nb.vscale(nb.vmul(g["Ambient"], g["Color"]), nb.sub(1.0, nb.mul(dark, 0.7)))
 
     # Path length through one slice; grazing rays cross more cloud.
-    step = nb.div(nb.div(g["Thickness"], float(CLOUD_SLICES)), nb.max(vz, 0.08))
+    step = nb.div(nb.div(g["Thickness"], g["Slices"]), nb.max(vz, 0.08))
     jitter = nb.white(nb.vscale(view, 5331.0))
 
     colour, trans = None, None
     for i in range(CLOUD_SLICES):
-        frac = nb.div(nb.add(jitter, float(i)), float(CLOUD_SLICES))
+        frac = nb.div(nb.add(jitter, float(i)), g["Slices"])
         s = group_node(nb, slice_group)
+        s.name = f"Slice {i}"
         nb.set(s, "View", view)
         nb.set(s, "Light Dir", g["Light Dir"])
         nb.set(s, "Height", nb.add(g["Height"], nb.mul(g["Thickness"], frac)))
         nb.set(s, "Frac", frac)
-        for key in ("Coverage", "Density", "Scale", "Puffiness", "Thickness", "Offset", "Evolve"):
+        for key in ("Coverage", "Density", "Scale", "Puffiness", "Thickness", "Offset",
+                    "Evolve", "Detail", "Light Detail"):
             nb.set(s, key, g[key])
-        sigma = find_output(s, "Sigma")
+        draft = i < QUALITY[True]["Slices"]
+        sigma = find_output(s, "Sigma") if draft else gate(nb, s, "Sigma")
+        light = find_output(s, "Light") if draft else gate(nb, s, "Light")
         alpha = nb.one_minus(nb.exp(nb.mul(nb.mul(sigma, step), -1.6)))
         powder = nb.sub(1.0, nb.mul(nb.exp(nb.mul(sigma, -2.0)), 0.5))
-        lit = nb.vscale(direct, nb.mul(find_output(s, "Light"), powder))
+        lit = nb.vscale(direct, nb.mul(light, powder))
         # Tops see more of the sky than the shaded bases.
         amb = nb.vscale(ambient, nb.add(0.45, nb.mul(frac, 0.55)))
         radiance = nb.vadd(nb.vadd(lit, amb), g["Flash"])

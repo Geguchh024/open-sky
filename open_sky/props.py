@@ -78,6 +78,14 @@ def _set_shafts(self, value):
         rig.set_light_shafts(world, value)
 
 
+def _get_draft(self):
+    return rig.uses_draft_clouds()
+
+
+def _set_draft(self, value):
+    rig.set_draft_clouds(value)
+
+
 def _preset_changed(self, context):
     bpy.ops.open_sky.apply_preset(preset=self.preset)
 
@@ -105,6 +113,10 @@ class OS_SceneSettings(bpy.types.PropertyGroup):
         name="Light Shafts", get=_get_shafts, set=_set_shafts,
         description="Fill the world with a thin volume so the sun casts visible "
                     "rays through gaps (slower to render, especially in Cycles)")
+    draft_clouds: bpy.props.BoolProperty(
+        name="Draft Clouds", get=_get_draft, set=_set_draft,
+        description="Half the cloud slices and less noise detail: about twice as fast "
+                    "in the viewport. Turn off for final renders")
     auto_exposure: bpy.props.BoolProperty(
         name="Night Exposure", get=_get_exposure, set=_set_exposure,
         description="Raise the camera exposure automatically after sunset")

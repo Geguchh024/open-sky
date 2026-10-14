@@ -11,7 +11,8 @@ import math
 
 import bpy
 
-from . import sky, weather
+from . import clouds, sky, weather
+from .nodekit import gates, set_gate
 
 NODE_NAME = "Open Sky"
 COLLECTION = "Open Sky"
@@ -23,6 +24,8 @@ MOON_NAME = "OS Moon"
 HOUR, DAY, LAT = "os_hour", "os_day", "os_latitude"
 OFF_EL, OFF_AZ = "os_moon_elevation", "os_moon_azimuth"
 EXPOSURE, BOOST = "os_exposure", "os_night_boost"
+# Animation clock: a scene property read by the world through an Attribute node.
+TIME, CLOCK = "os_time", "OS Clock"
 
 
 # -- lookups ---------------------------------------------------------------------------
@@ -190,9 +193,37 @@ def _weather_drivers(world, scene):
                    {"z": _w(world, "Sun Direction", 2)})
 
 
-def _time_driver(world, scene):
+def _clock(world, scene):
+    """Feed the sky's Time input from a frame-driven property on the scene.
+
+    A driver on the world's own nodes would tag the world every frame: EEVEE
+    then re-bakes the world lighting from the full sky shader and every lamp
+    driver reading the world re-evaluates (sun shadows included), which drops
+    playback to a few fps even when nothing in the sky moves. The shader reads
+    the scene property through an Attribute node instead, so moving clouds,
+    stars and aurora only redraw the background.
+    """
+    node = sky_node(world)
+    _clear(node.inputs["Time"], "default_value")
+    tree = world.node_tree
+    attr = tree.nodes.get(CLOCK)
+    if attr is None or attr.bl_idname != "ShaderNodeAttribute":
+        attr = tree.nodes.new("ShaderNodeAttribute")
+        attr.name = attr.label = CLOCK
+    attr.attribute_type = "VIEW_LAYER"
+    attr.attribute_name = TIME
+    attr.location = (node.location.x - 220, node.location.y - 420)
+    tree.links.new(attr.outputs["Fac"], node.inputs["Time"])
+    _set_prop(scene, TIME, 0.0, description="Seconds of sky animation (clouds, stars, "
+                                            "aurora), driven by the current frame")
     fps = scene.render.fps / scene.render.fps_base
-    _drive(sky_node(world).inputs["Time"], "default_value", None, f"frame/{fps:g}", {})
+    _drive(scene, f'["{TIME}"]', None, f"frame/{fps:g}", {})
+
+
+def uses_old_clock(world):
+    """True for skies saved when Time was driven on the world itself."""
+    node = sky_node(world)
+    return node is not None and not node.inputs["Time"].is_linked
 
 
 # -- optional modes ------------------------------------------------------------------------
@@ -311,6 +342,82 @@ def set_auto_exposure(scene, world, enable):
             "z": _w(world, "Sun Direction", 2)})
 
 
+# -- skipping unused layers ---------------------------------------------------------------
+
+def _animated_paths(idb):
+    """Data paths with keyframes or drivers on an ID."""
+    ad = idb.animation_data if idb is not None else None
+    if ad is None:
+        return set()
+    paths = {fc.data_path for fc in ad.drivers}
+    action = ad.action
+    if action is not None:
+        fcurves = getattr(action, "fcurves", None)
+        if fcurves is None:  # layered actions (Blender 4.4+)
+            fcurves = [fc for layer in action.layers for strip in layer.strips
+                       for bag in strip.channelbags for fc in bag.fcurves]
+        paths.update(fc.data_path for fc in fcurves)
+    return paths
+
+
+def feature_used(world, feature):
+    """True when any input switching on `feature` is above 0 or animated."""
+    node = sky_node(world)
+    if node is None:
+        return False
+    animated = _animated_paths(world.node_tree)
+    inputs = list(node.inputs)
+    for name in sky.FEATURES[feature]:
+        sock = node.inputs.get(name)
+        if sock is None:
+            continue
+        if sock.is_linked or sock.default_value > 0.0:
+            return True
+        # Keyframes address the socket by name or by index.
+        keys = (f'inputs["{name}"]', f'inputs["{sock.identifier}"]',
+                f"inputs[{inputs.index(sock)}]")
+        prefix = f'nodes["{NODE_NAME}"].'
+        if any(p.startswith(prefix) and p[len(prefix):].startswith(keys) for p in animated):
+            return True
+    return False
+
+
+def prune():
+    """Link each optional layer of the main group only while some sky uses it.
+
+    The group is shared by every Open Sky world, so a layer stays on if any
+    of them needs it. Returns True when links changed (the shader recompiles).
+    """
+    group = bpy.data.node_groups.get(sky.MAIN)
+    if group is None:
+        return False
+    worlds = [w for w in bpy.data.worlds if sky_node(w) and sky_node(w).node_tree == group]
+    used = {f: any(feature_used(w, f) for w in worlds) for f in sky.FEATURES}
+    changed = False
+    for gate, src, output in gates(group):
+        changed |= set_gate(group, gate, src, output, used.get(src.name, True))
+    return changed
+
+
+def uses_draft_clouds():
+    group = bpy.data.node_groups.get(sky.MAIN)
+    deck = group.nodes.get(sky.CLOUDS) if group else None
+    return bool(deck and deck.inputs["Slices"].default_value < clouds.CLOUD_SLICES)
+
+
+def set_draft_clouds(enable):
+    """Fewer cloud slices and less noise detail, for a faster viewport."""
+    group = bpy.data.node_groups.get(sky.MAIN)
+    deck = group.nodes.get(sky.CLOUDS) if group else None
+    tree = bpy.data.node_groups.get(sky.CLOUDS)
+    if deck is None or tree is None:
+        return
+    for name, value in clouds.QUALITY[bool(enable)].items():
+        deck.inputs[name].default_value = value
+    for gate, src, output in gates(tree):
+        set_gate(tree, gate, src, output, not enable)
+
+
 # -- sun helpers -------------------------------------------------------------------------
 
 def sun_angles(ob):
@@ -394,7 +501,7 @@ def connect(world, scene):
     follow = moon_follows(world)
     _direction_drivers(world, "Sun Direction", sun)
     _direction_drivers(world, "Moon Direction", moon)
-    _time_driver(world, scene)
+    _clock(world, scene)
     _sun_light_drivers(world, sun)
     _moon_light_drivers(world, moon)
     if weather_object(world) is None:
@@ -402,6 +509,7 @@ def connect(world, scene):
     _weather_drivers(world, scene)
     set_moon_follow(world, follow)
     set_time_of_day(world, time_mode)
+    prune()
 
 
 def create(scene, world=None):
@@ -432,16 +540,25 @@ def upgrade(world, scene):
 
 
 def upgrade_file():
-    if sky.groups_current() or bpy.data.node_groups.get(sky.MAIN) is None:
+    if bpy.data.node_groups.get(sky.MAIN) is None:
         return False
-    _rebuild([w for w in bpy.data.worlds if is_sky_world(w)], bpy.context.scene)
-    return True
+    worlds = [w for w in bpy.data.worlds if is_sky_world(w)]
+    if not sky.groups_current():
+        _rebuild(worlds, bpy.context.scene)
+        return True
+    old = [w for w in worlds if uses_old_clock(w)]
+    for w in old:
+        for scene in bpy.data.scenes:
+            if scene.world == w:
+                _clock(w, scene)
+    return prune() or bool(old)
 
 
 def _rebuild(worlds, scene):
     # Rebuilding a group recreates its sockets, which drops the values and
     # links of the group nodes using it; save and restore both.
     saved = [(w, snapshot(sky_node(w)), uses_light_shafts(w)) for w in worlds]
+    draft = uses_draft_clouds()
     group = sky.ensure_groups(force=True)
     for w, values, shafts in saved:
         _wire_world(w, group)
@@ -449,6 +566,8 @@ def _rebuild(worlds, scene):
         set_light_shafts(w, shafts)
         if sun_object(w) and moon_object(w):
             connect(w, scene)
+    set_draft_clouds(draft)
+    prune()
 
 
 def reset_inputs(node, keep=()):

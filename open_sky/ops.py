@@ -66,6 +66,7 @@ def apply_preset(world, preset_id):
         moon[rig.OFF_EL] = math.radians(el)
         moon[rig.OFF_AZ] = math.radians(az)
         moon.update_tag()
+    rig.prune()
 
 
 class OS_OT_select_lamp(bpy.types.Operator):
@@ -135,6 +136,7 @@ class OS_OT_reset(bpy.types.Operator):
         if world is None:
             return {"CANCELLED"}
         rig.reset_inputs(rig.sky_node(world))
+        rig.prune()
         return {"FINISHED"}
 
 
